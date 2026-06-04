@@ -744,14 +744,25 @@
       const [showAddDcaCoin, setShowAddDcaCoin] = useState(false);
       const [newDcaCoin, setNewDcaCoin] = useState({ symbol: '', name: '', coingeckoId: '' });
 
-      // helpers - equal split across all coins
+      // helpers - budget per coin (custom or equal split)
       const dcaNumCoins = dcaState.coins.length || 1;
-      const dcaBudgetPerCoin = () => dcaState.totalBudget / dcaNumCoins;
-      const dcaWeeklyBase = () => dcaBudgetPerCoin() / dcaState.weeks;
+      const dcaBudgetPerCoin = (symbol) => {
+        if (symbol) {
+          const coin = dcaState.coins.find(c => c.symbol === symbol);
+          if (coin && coin.customBudget > 0) return coin.customBudget;
+        }
+        // Equal split among coins without custom budget
+        const customCoins = dcaState.coins.filter(c => c.customBudget > 0);
+        const customTotal = customCoins.reduce((s, c) => s + c.customBudget, 0);
+        const autoCoins = dcaState.coins.filter(c => !c.customBudget || c.customBudget <= 0);
+        const remaining = dcaState.totalBudget - customTotal;
+        return autoCoins.length > 0 ? remaining / autoCoins.length : 0;
+      };
+      const dcaWeeklyBase = (symbol) => dcaBudgetPerCoin(symbol) / dcaState.weeks;
 
       // Compute per-coin summary (invested, reserve, coins, currentValue)
       const dcaCoinSummary = (coin) => {
-        const weekly = dcaWeeklyBase();
+        const weekly = dcaWeeklyBase(coin.symbol);
         let reserve = 0;
         let invested = 0;
         let coinsBought = 0;
@@ -815,8 +826,17 @@
             const price = parseFloat(mergedRow.price) || 0;
             if (price > 0 && mergedRow.zone && mergedRow.zone !== 'SKIP') {
               // Use s (latest state) for budget calculations, not stale dcaState
-              const numCoins = s.coins.length || 1;
-              const weekly = (s.totalBudget / numCoins) / s.weeks;
+              const thisCoin = s.coins.find(c => c.symbol === symbol);
+              const hasCustom = thisCoin && thisCoin.customBudget > 0;
+              let coinBudget;
+              if (hasCustom) {
+                coinBudget = thisCoin.customBudget;
+              } else {
+                const customTotal = s.coins.filter(c => c.customBudget > 0).reduce((sum, c) => sum + c.customBudget, 0);
+                const autoCount = s.coins.filter(c => !c.customBudget || c.customBudget <= 0).length || 1;
+                coinBudget = (s.totalBudget - customTotal) / autoCount;
+              }
+              const weekly = coinBudget / s.weeks;
               // Calculate reserve up to this row
               let reserve = 0;
               for (let i = 0; i < rowIdx; i++) {
@@ -6880,10 +6900,11 @@
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
                       <div>
-                        <label className="text-xs text-gray-400">תקציב כולל ($)</label>
+                        <label className="text-xs text-gray-400">תקציב נותר ($) <span className="text-gray-600">(מקורי: {fmtC(dcaState.totalBudget)})</span></label>
+                        <div className="w-full bg-gray-900 border border-cyan-700 text-cyan-300 rounded px-3 py-2 font-bold">{fmtC(remainingBudget)}</div>
                         <input type="number" value={dcaState.totalBudget}
                           onChange={e => setDcaState(s => ({ ...s, totalBudget: parseFloat(e.target.value) || 0 }))}
-                          className="w-full bg-gray-900 border border-cyan-700 text-cyan-300 rounded px-3 py-2 font-bold" />
+                          className="w-full bg-gray-900 border border-gray-700 text-gray-500 rounded px-2 py-1 text-xs mt-1" />
                       </div>
                       <div>
                         <label className="text-xs text-gray-400">מספר שבועות</label>
@@ -6906,7 +6927,6 @@
                       {[
                         ['מושקע בפועל', fmtC(totalInvested), 'text-blue-400'],
                         ['בקופה (USDC)', fmtC(totalReserve), 'text-yellow-400'],
-                        ['נותר להקצות', fmtC(remainingBudget), 'text-gray-300'],
                         ['שווי נוכחי', fmtC(totalCurrentValue), 'text-cyan-400'],
                         [`רווח/הפסד`, `${fmtC(totalPnl)} (${totalPnlPct >= 0 ? '+' : ''}${totalPnlPct.toFixed(1)}%)`, totalPnl >= 0 ? 'text-green-400' : 'text-red-400'],
                       ].map(([lbl, val, color]) => (
@@ -7083,7 +7103,7 @@
 
                   {/* Per-coin sections — all on one scrollable page */}
                   {summaries.map(({ coin, summary }) => {
-                    const budget = dcaBudgetPerCoin();
+                    const budget = dcaBudgetPerCoin(coin.symbol);
                     const weekly = summary.weekly;
                     const currentPrice = currentPrices[coin.symbol] || 0;
                     const avgPrice = summary.coinsBought > 0 ? summary.invested / summary.coinsBought : 0;
@@ -7117,15 +7137,25 @@
                                 className="text-cyan-400 hover:text-cyan-200 disabled:opacity-50 ml-1">{priceLoading ? '⏳' : '🔄'}</button>
                             </div>
                             <div className="flex items-center gap-2 text-xs">
-                              <span className="text-cyan-300 font-semibold">1/{dcaNumCoins} מהתקציב</span>
+                              <span className="text-cyan-300 font-semibold">{coin.customBudget > 0 ? 'תקציב ידני' : `1/${dcaNumCoins} מהתקציב`}</span>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2 text-xs">
+                          <div className="flex items-center gap-2 text-xs flex-wrap">
                             <span className="text-gray-400">תקציב:</span>
-                            <span className="text-yellow-300 font-bold">{fmtC(budget)}</span>
+                            <input type="number" value={coin.customBudget || ''}
+                              placeholder={fmtC(budget).replace('$','')}
+                              onChange={e => {
+                                const val = parseFloat(e.target.value) || 0;
+                                dcaUpdateCoin(coin.symbol, { customBudget: val });
+                              }}
+                              className="w-20 bg-gray-900 border border-yellow-700 text-yellow-300 rounded px-1.5 py-0.5 text-xs font-bold text-center" />
                             <span className="text-gray-500 mx-1">|</span>
                             <span className="text-gray-400">שבועי:</span>
                             <span className="text-green-300 font-bold">{fmtC(weekly)}</span>
+                            {coin.customBudget > 0 && (
+                              <button onClick={() => dcaUpdateCoin(coin.symbol, { customBudget: 0 })}
+                                className="text-xs text-gray-500 hover:text-gray-300" title="חזור לחלוקה שווה">איפוס</button>
+                            )}
                             <button onClick={() => dcaRemoveCoin(coin.symbol)} className="ml-3 px-2 py-1 bg-red-800 hover:bg-red-700 rounded text-xs text-white">הסר</button>
                           </div>
                         </div>
