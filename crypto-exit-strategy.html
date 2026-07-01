@@ -7932,6 +7932,37 @@
                     </div>
                   </div>
 
+                  {/* Clipboard paste banner - visible at month level */}
+                  {cfClipboard && (
+                    <div className="bg-yellow-900 border border-yellow-600 rounded-lg p-3 mb-3 flex items-center justify-between">
+                      <div className="text-yellow-200 text-sm">
+                        {cfClipboard.mode === 'cut' ? 'נגזר' : 'הועתק'}: <b>{cfClipboard.data.description}</b>
+                        {cfClipboard.data.details ? ` (${cfClipboard.data.details})` : ''}
+                        {cfClipboard.srcMonth != null ? ` — מחודש ${cashflowData.months[cfClipboard.srcMonth]?.name || cfClipboard.srcMonth}` : ''}
+                      </div>
+                      <div className="flex gap-2">
+                        <select id="cf-paste-target-week" className="bg-gray-800 text-white text-xs rounded px-2 py-1 border border-gray-600">
+                          {month.weeks.map((w, wi) => (
+                            <option key={wi} value={wi}>{w.period === 'unassigned' ? 'לא משויך' : w.period}</option>
+                          ))}
+                        </select>
+                        <button onClick={() => {
+                          const sel = document.getElementById('cf-paste-target-week');
+                          const targetWeek = parseInt(sel?.value || '0');
+                          const pasted = {...cfClipboard.data, actual: null, addedDuringMonth: true};
+                          if (cfClipboard.mode === 'cut') {
+                            cfDeleteItem(cfClipboard.srcMonth, cfClipboard.srcWeek, cfClipboard.srcItem, null, true);
+                          }
+                          cfAddItem(cfSelectedMonth, targetWeek, pasted);
+                          setCfClipboard(null);
+                        }} className="px-3 py-1 bg-yellow-700 hover:bg-yellow-600 rounded text-sm text-white font-semibold">
+                          {cfClipboard.mode === 'cut' ? 'הדבק (גזירה)' : 'הדבק (העתקה)'}
+                        </button>
+                        <button onClick={() => setCfClipboard(null)} className="px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs text-white">ביטול</button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Weekly breakdown */}
                   {month.weeks.map((week, wIdx) => {
                     const weekKey = `${cfSelectedMonth}-${wIdx}`;
