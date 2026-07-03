@@ -1020,7 +1020,90 @@
         setTimeout(() => { dcaAutoCalcRunning.current = false; }, 200);
       }, [dcaState]);
 
+      // ═══════════════════════════════════════════════════════════════
+      // DCA → Transactions sync: ensure every DCA row with purchases has a matching transaction
+      // ═══════════════════════════════════════════════════════════════
+      const dcaSyncRan = useRef(false);
+      useEffect(() => {
+        if (dcaSyncRan.current) return;
+        if (!dcaState?.coins?.length || !transactions) return;
+        dcaSyncRan.current = true;
+
+        const existingDcaIds = new Set(transactions.filter(t => t.dcaId).map(t => t.dcaId));
+        const toAdd = [];
+        const validDcaIds = new Set();
+
+        dcaState.coins.forEach(coin => {
+          coin.rows.forEach((row, rowIdx) => {
+            const amount = parseFloat(row.coinsPurchased) || 0;
+            if (amount <= 0) return;
+            const price = parseFloat(row.price) || 0;
+            const total = amount * price;
+            const txId = `dca_${coin.symbol}_${rowIdx}_${row.date}`;
+            const txIdW = `dca_w_${coin.symbol}_${rowIdx}_${row.date}`;
+            validDcaIds.add(txId);
+            validDcaIds.add(txIdW);
+
+            // Check if deposit transaction exists
+            if (!existingDcaIds.has(txId)) {
+              const wallet = getDcaWallet(coin.symbol);
+              const uniqueId = Math.abs(txId.split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0)) || Date.now();
+              toAdd.push({
+                id: uniqueId,
+                dcaId: txId,
+                coin: coin.symbol,
+                type: 'Deposit',
+                wallet: wallet,
+                date: row.date,
+                amount: amount,
+                avgPrice: price,
+                total: total,
+                note: `DCA ${row.zone || 'manual'} - ${wallet} (sync)`
+              });
+            }
+            // Check if USDC withdrawal transaction exists
+            if (!existingDcaIds.has(txIdW)) {
+              const wallet = getDcaWallet(coin.symbol);
+              const uniqueId = Math.abs(txIdW.split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0)) || Date.now();
+              toAdd.push({
+                id: uniqueId + 1,
+                dcaId: txIdW,
+                coin: 'USDC',
+                type: 'Withdrawal',
+                wallet: wallet,
+                date: row.date,
+                amount: total,
+                avgPrice: 1,
+                total: total,
+                note: `DCA המרה ל-${coin.symbol} (sync)`
+              });
+            }
+          });
+        });
+
+        // Remove orphan DCA transactions (dcaId exists but no matching DCA row)
+        const orphanIds = transactions
+          .filter(t => t.dcaId && (t.dcaId.startsWith('dca_') || t.dcaId.startsWith('dca_w_')) && !validDcaIds.has(t.dcaId))
+          .map(t => t.dcaId);
+
+        if (toAdd.length > 0 || orphanIds.length > 0) {
+          console.log(`[DCA Sync] Adding ${toAdd.length} missing transactions, removing ${orphanIds.length} orphans`);
+          setTransactions(prev => {
+            let updated = orphanIds.length > 0 ? prev.filter(t => !orphanIds.includes(t.dcaId)) : [...prev];
+            return [...updated, ...toAdd];
+          });
+        }
+      }, [dcaState, transactions]);
+
       const dcaDeleteRow = (symbol, rowIdx) => {
+        // Remove corresponding transactions
+        const coinData = dcaState.coins.find(c => c.symbol === symbol);
+        if (coinData && coinData.rows[rowIdx]) {
+          const row = coinData.rows[rowIdx];
+          const txId = `dca_${symbol}_${rowIdx}_${row.date}`;
+          const txIdW = `dca_w_${symbol}_${rowIdx}_${row.date}`;
+          setTransactions(prev => prev.filter(t => t.dcaId !== txId && t.dcaId !== txIdW));
+        }
         setDcaState(s => ({
           ...s,
           coins: s.coins.map(c => c.symbol !== symbol ? c : ({
@@ -1032,6 +1115,8 @@
 
       const dcaRemoveCoin = (symbol) => {
         if (!confirm(`להסיר את ${symbol} מ-DCA?`)) return;
+        // Remove all DCA transactions for this coin
+        setTransactions(prev => prev.filter(t => !t.dcaId || !t.dcaId.startsWith(`dca_${symbol}_`) && !t.dcaId.startsWith(`dca_w_${symbol}_`)));
         setDcaState(s => ({ ...s, coins: s.coins.filter(c => c.symbol !== symbol) }));
       };
 
@@ -8416,18 +8501,19 @@
                             };
                             return mergedMonths.map((m, mIdx) => {
                             const isFuture = mIdx > curMonthIdx;
+                            const isCurOrPast = mIdx <= curMonthIdx;
                             const isCurMonth = mIdx === curMonthIdx;
-                            // For current month: only remaining (unpaid/unreceived) items, since opening = current bank status
+                            // For current & past months: only remaining (unpaid/unreceived) items, since opening = current bank status
                             // For future months: all sourceFixed expenses count as Israel
                             let mIncIL, mExpIL;
-                            if (isCurMonth) {
+                            if (isCurOrPast) {
                               mIncIL = m.weeks.reduce((s, w) => s + w.items.filter(i => i.type === 'income' && i.region === 'israel' && i.actual == null).reduce((ss, i) => ss + (i.planned || 0), 0), 0);
                               mExpIL = m.weeks.reduce((s, w) => s + w.items.filter(i => i.type === 'expense' && i.region === 'israel' && i.actual == null).reduce((ss, i) => ss + Math.abs(i.planned || 0), 0), 0);
                             } else {
                               mIncIL = m.weeks.reduce((s, w) => s + w.items.filter(i => i.type === 'income' && i.region === 'israel' && !i.sourceAutoCalc).reduce((ss, i) => ss + (i.actual != null ? i.actual : (i.planned || 0)), 0), 0);
                               mExpIL = m.weeks.reduce((s, w) => s + w.items.filter(i => i.type === 'expense' && (i.region === 'israel' || (isFuture && i.sourceFixed && i.region === 'thailand'))).reduce((ss, i) => ss + Math.abs(i.actual != null ? i.actual : (i.planned || 0)), 0), 0);
                             }
-                            // Thailand: for current month use balance-based approach
+                            // Thailand: for current/past months use balance-based approach
                             const mThSources = getThSources(mIdx);
                             const mThBalanceILS = mThSources.reduce((s, src) => {
                               const cur = src.currency || 'THB';
@@ -8435,10 +8521,10 @@
                               return s + (src.baht || 0) * rate;
                             }, 0);
                             const mIncTHItems = m.weeks.reduce((s, w) => s + w.items.filter(i => i.type === 'income' && i.region === 'thailand').reduce((ss, i) => ss + (i.actual != null ? i.actual : (i.planned || 0)), 0), 0);
-                            // Current month: "income" = current balance, "expenses" = only remaining unpaid
-                            // Past/future months: income = items + sources, expenses = all
+                            // Current/past months: "income" = current balance, "expenses" = only remaining unpaid
+                            // Future months: income = items + sources, expenses = all
                             let mIncTH, mExpTH;
-                            if (isCurMonth) {
+                            if (isCurOrPast) {
                               mIncTH = mThBalanceILS;
                               mExpTH = m.weeks.reduce((s, w) => s + w.items
                                 .filter(i => i.type === 'expense' && i.region === 'thailand' && i.actual == null)
