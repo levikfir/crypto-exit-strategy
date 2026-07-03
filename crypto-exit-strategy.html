@@ -1027,6 +1027,9 @@
       useEffect(() => {
         if (dcaSyncRan.current) return;
         if (!dcaState?.coins?.length || !transactions) return;
+        // Don't run until real data is loaded from IDB (default has empty rows)
+        const hasRealData = dcaState.coins.some(c => c.rows.length > 0);
+        if (!hasRealData) return;
         dcaSyncRan.current = true;
 
         const existingDcaIds = new Set(transactions.filter(t => t.dcaId).map(t => t.dcaId));
