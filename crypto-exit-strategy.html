@@ -15,6 +15,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js" crossorigin="anonymous"></script>
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <!-- Firebase SDK (compat for single-file usage) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; background: #111827; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
@@ -102,6 +105,57 @@
         const tx = db.transaction(STORE_NAME, 'readwrite');
         tx.objectStore(STORE_NAME).put(value, key);
       } catch {}
+    };
+
+    // === Firebase Realtime Sync ===
+    const firebaseConfig = {
+      apiKey: "AIzaSyBnay7NzyFn1MwJWGwbYEq5d-kZtIIuMXY",
+      authDomain: "financi-d0790.firebaseapp.com",
+      projectId: "financi-d0790",
+      storageBucket: "financi-d0790.firebasestorage.app",
+      messagingSenderId: "922363711412",
+      appId: "1:922363711412:web:b512087e7e3c4bffad2ce1"
+    };
+    let fireDb = null;
+    try {
+      const fbApp = firebase.initializeApp(firebaseConfig);
+      fireDb = firebase.firestore();
+      console.log('Firebase connected');
+    } catch(e) { console.warn('Firebase init failed:', e); }
+
+    // Firestore doc path: appData/{key}
+    const FIRE_COLLECTION = 'appData';
+    // Track keys being written to Firestore to avoid echo loops
+    const _fireSaving = {};
+    // Track keys being received from Firestore to avoid saving back
+    const _fireReceiving = {};
+
+    const fireSet = async (key, value) => {
+      if (!fireDb) return;
+      try {
+        _fireSaving[key] = true;
+        await fireDb.collection(FIRE_COLLECTION).doc(key).set({
+          value: JSON.stringify(value),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      } catch(e) { console.warn('Firebase save error:', key, e); }
+      finally { setTimeout(() => { delete _fireSaving[key]; }, 500); }
+    };
+
+    // Subscribe to Firestore changes for a key; calls onUpdate(parsedValue) on remote changes
+    const fireSubscribe = (key, onUpdate) => {
+      if (!fireDb) return () => {};
+      return fireDb.collection(FIRE_COLLECTION).doc(key).onSnapshot(snap => {
+        if (_fireSaving[key]) return; // ignore echo from our own write
+        if (!snap.exists) return;
+        try {
+          const data = snap.data();
+          const parsed = JSON.parse(data.value);
+          _fireReceiving[key] = true;
+          onUpdate(parsed);
+          setTimeout(() => { delete _fireReceiving[key]; }, 500);
+        } catch(e) { console.warn('Firebase parse error:', key, e); }
+      }, err => console.warn('Firebase listen error:', key, err));
     };
 
     // === Backup & Restore ===
@@ -389,8 +443,10 @@
     };
     migrateSplitUtilV18();
 
-    // Sync hook: load from IDB on mount, save on change
+    // Sync hook: load from IDB on mount, save on change, sync with Firebase
     // mergeFn(idbValue, initialValue) → merged value (optional, for merging defaults into IDB data)
+    const SYNCED_KEYS = new Set(['coinMeta', 'transactions', 'savedWallets', 'dcaState', 'cashflowData', 'cfBizAccounts', 'cfThSources', 'portfolioSnapshot', 'exitTargets', 'profitDistribution', 'sellAllocation', 'levelFilters', 'capldrIncome', 'capldrSettings', 'vaultTargets', 'preciousMetals']);
+
     const useIDBState = (key, initialValue, mergeFn) => {
       const [state, setState] = useState(initialValue);
       const loaded = useRef(false);
@@ -401,18 +457,30 @@
           if (val !== null) {
             const final = mergeFn ? mergeFn(val, initialValue) : val;
             setState(final);
-            // If merge changed something, persist it
             if (mergeFn && final !== val) idbSet(key, final);
           }
           loaded.current = true;
-          // allow saves after a tick
           setTimeout(() => { skipNextSave.current = false; }, 100);
         });
+        // Subscribe to Firebase changes for synced keys
+        if (SYNCED_KEYS.has(key)) {
+          const unsub = fireSubscribe(key, (remoteVal) => {
+            if (!loaded.current) return; // don't override while still loading
+            const final = mergeFn ? mergeFn(remoteVal, initialValue) : remoteVal;
+            setState(final);
+            idbSet(key, final); // persist remote data locally
+          });
+          return unsub;
+        }
       }, []);
 
       useEffect(() => {
         if (skipNextSave.current) return;
         idbSet(key, state);
+        // Sync to Firebase if this key should be synced, and change is local (not from Firebase)
+        if (SYNCED_KEYS.has(key) && !_fireReceiving[key]) {
+          fireSet(key, state);
+        }
       }, [state]);
 
       return [state, setState];
